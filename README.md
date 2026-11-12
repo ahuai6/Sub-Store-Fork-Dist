@@ -6,7 +6,7 @@ The source repository (`ahuai6/Sub-Store-Fork`) is private. Do not put source he
 | | |
 | --- | --- |
 | Version | `2.44.8` |
-| Built from | `03072cfe3b5130c8e056ec462b27e082fbbf42af` |
+| Built from | `424a8d0ae009c4704d45627669c0f0765d46ab2f` |
 | Upstream tree | `091e6f8d8c2dcec8c1d8e792ecee4304935d6e90` |
 | Upstream project | https://github.com/sub-store-org/Sub-Store |
 
@@ -23,10 +23,16 @@ https://github.com/ahuai6/Sub-Store-Fork-Dist/releases/latest/download/Surge-Bet
 ```
 
 Script paths inside the module use `releases/latest/download` on **this** repo.
-Compared with [upstream's beta module](https://raw.githubusercontent.com/sub-store-org/Sub-Store/master/config/Surge-Beta.sgmodule), only those artifact URLs differ.
+Compared with [upstream's beta module](https://raw.githubusercontent.com/sub-store-org/Sub-Store/master/config/Surge-Beta.sgmodule), those artifact URLs differ and the default `cors` list also includes `https://ahuai6.github.io`.
+
+## Frontend
+
+https://ahuai6.github.io/Sub-Store-Fork-Dist/
+
+The `/` redirect targets that site. It is the upstream front end (GPL-3.0), built for this subpath. License and corresponding source are on the `gh-pages` branch.
 
 ## License
 
 Sub-Store is licensed under the GNU Affero General Public License v3.0. See [LICENSE](./LICENSE).
 
-Corresponding source for this build is upstream commit `091e6f8d8c2dcec8c1d8e792ecee4304935d6e90` (https://github.com/sub-store-org/Sub-Store/tree/091e6f8d8c2dcec8c1d8e792ecee4304935d6e90) plus whatever else is in the private source repo at `03072cfe3b5130c8e056ec462b27e082fbbf42af`. The release build also pins the mihomo User-Agent the same way upstream's release workflow does. AGPL-3.0 requires modified versions that are distributed to make their corresponding source available.
+Corresponding source for this build is upstream commit `091e6f8d8c2dcec8c1d8e792ecee4304935d6e90` (https://github.com/sub-store-org/Sub-Store/tree/091e6f8d8c2dcec8c1d8e792ecee4304935d6e90) plus whatever else is in the private source repo at `424a8d0ae009c4704d45627669c0f0765d46ab2f`. The release build also pins the mihomo User-Agent the same way upstream's release workflow does. AGPL-3.0 requires modified versions that are distributed to make their corresponding source available.
