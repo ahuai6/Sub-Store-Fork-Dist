@@ -1,0 +1,7 @@
+sha=6d13e7e257b52485d6835d1bbdbd1fc3f8270dd2
+track=release
+release_tag=2.34.2
+release_sha=6d13e7e257b52485d6835d1bbdbd1fc3f8270dd2
+package=2.34.2
+base=/Sub-Store-Fork-Dist/
+api=https://sub.store

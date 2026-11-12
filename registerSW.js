@@ -1,0 +1,1 @@
+if('serviceWorker' in navigator) {window.addEventListener('load', () => {navigator.serviceWorker.register('/Sub-Store-Fork-Dist/sw.js', { scope: '/Sub-Store-Fork-Dist/' })})}
