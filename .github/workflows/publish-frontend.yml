@@ -1,0 +1,175 @@
+name: publish-frontend
+
+# Build sub-store-org/Sub-Store-Front-End and push it to this repo's gh-pages
+# branch. The private fork no longer runs this on a schedule.
+#
+# Patching, the version stamp, and the gh-pages push all come from the private
+# repo's scripts, checked out at runtime. This workflow does not upload Actions
+# artifacts and does not force-push. publish_frontend_pages.sh only updates
+# gh-pages.
+on:
+  schedule:
+    # Daily, after sync-upstream (04:17 UTC), on its own minute.
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild and push even when this commit is already deployed
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-frontend
+  cancel-in-progress: false
+
+env:
+  FORK_REPO: ahuai6/Sub-Store-Fork
+  PUBLIC_DIST_REPO: ahuai6/Sub-Store-Fork-Dist
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+  FORCE: ${{ github.event.inputs.force == 'true' }}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Require FORK_REPO_TOKEN
+        env:
+          FORK_REPO_TOKEN: ${{ secrets.FORK_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          trimmed=$(printf '%s' "$FORK_REPO_TOKEN" | tr -d '[:space:]')
+          if [[ -z "$trimmed" ]]; then
+            echo "::error title=FORK_REPO_TOKEN is not set::Add repository secret FORK_REPO_TOKEN on ahuai6/Sub-Store-Fork-Dist. It must be a fine-grained PAT for ahuai6/Sub-Store-Fork only, with Contents, Pull requests, and Issues set to Read and write, and Commit statuses set to Read and write."
+            exit 1
+          fi
+
+      - name: Checkout private fork scripts
+        uses: actions/checkout@v6
+        with:
+          repository: ahuai6/Sub-Store-Fork
+          token: ${{ secrets.FORK_REPO_TOKEN }}
+          ref: main
+          path: fork
+          persist-credentials: false
+
+      - name: Resolve front-end commit
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash fork/.github/scripts/resolve_frontend_ref.sh
+
+      - name: Skip when this commit is already deployed
+        id: deployed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          if [[ "$FORCE" == "true" ]]; then
+            echo "Force requested. Building ${{ steps.resolve.outputs.sha }}."
+            exit 0
+          fi
+          set +e
+          raw=$(gh api "repos/${PUBLIC_DIST_REPO}/contents/frontend-version.txt?ref=gh-pages" --jq .content 2>/tmp/pages-version.err)
+          code=$?
+          set -e
+          if [[ "$code" -ne 0 ]]; then
+            echo "No deployed frontend-version.txt yet."
+            exit 0
+          fi
+          text=$(printf '%s' "$raw" | tr -d '\n' | base64 -d)
+          deployed_sha=$(printf '%s\n' "$text" | awk -F= '$1=="sha"{print $2}')
+          deployed_base=$(printf '%s\n' "$text" | awk -F= '$1=="base"{print $2}')
+          deployed_api=$(printf '%s\n' "$text" | awk -F= '$1=="api"{print $2}')
+          deployed_patches=$(printf '%s\n' "$text" | awk -F= '$1=="patches"{print $2}')
+          expected_patches=$(python3 fork/.github/scripts/prepare_frontend_pages.py --print-patch-stamp)
+          if [[ -z "$expected_patches" || "$expected_patches" == *$'\n'* ]]; then
+            echo "::error::patch stamp from prepare_frontend_pages.py is empty or multiline"
+            exit 1
+          fi
+          if [[ "$deployed_sha" == "${{ steps.resolve.outputs.sha }}" \
+            && "$deployed_base" == "/Sub-Store-Fork-Dist/" \
+            && "$deployed_api" == "https://sub.store" \
+            && "$deployed_patches" == "$expected_patches" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Front end already deployed"
+              echo ""
+              echo "\`${deployed_sha}\` is already on \`gh-pages\` with the Pages base, \`https://sub.store\`, and patch stamp \`${expected_patches}\`."
+              echo ""
+              echo "https://ahuai6.github.io/Sub-Store-Fork-Dist/"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Deployed sha=${deployed_sha:-<none>} patches=${deployed_patches:-<none>} -> sha=${{ steps.resolve.outputs.sha }} patches=${expected_patches}"
+          fi
+
+      - name: Checkout front end
+        if: steps.deployed.outputs.skip != 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: sub-store-org/Sub-Store-Front-End
+          ref: ${{ steps.resolve.outputs.sha }}
+          path: frontend
+
+      - name: Set up Node.js
+        if: steps.deployed.outputs.skip != 'true'
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: frontend/.node-version
+
+      - name: Patch the Pages base and PWA scope
+        if: steps.deployed.outputs.skip != 'true'
+        run: |
+          python3 fork/.github/scripts/prepare_frontend_pages.py \
+            --patch \
+            --frontend-dir frontend
+
+      - name: Install and build
+        if: steps.deployed.outputs.skip != 'true'
+        env:
+          VITE_API_URL: https://sub.store
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: |
+          set -euo pipefail
+          corepack enable
+          cd frontend
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Add license, attribution, and SPA fallback
+        if: steps.deployed.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          package=$(node -p "require('./frontend/package.json').version")
+          python3 fork/.github/scripts/prepare_frontend_pages.py \
+            --finalize-site \
+            --dist frontend/dist \
+            --frontend-dir frontend \
+            --sha "${{ steps.resolve.outputs.sha }}" \
+            --track "${{ steps.resolve.outputs.track }}" \
+            --release-tag "${{ steps.resolve.outputs.release_tag }}" \
+            --release-sha "${{ steps.resolve.outputs.release_sha }}" \
+            --package "$package"
+
+      - name: Publish gh-pages
+        if: steps.deployed.outputs.skip != 'true'
+        env:
+          GITHUB_REPOSITORY: ahuai6/Sub-Store-Fork
+          FORK_ROOT: ${{ github.workspace }}/fork
+          PUBLIC_DIST_TOKEN: ${{ github.token }}
+          PUBLIC_DIST_REPO: ${{ env.PUBLIC_DIST_REPO }}
+        run: |
+          set -euo pipefail
+          # Same override as publish-dist: the script refuses to publish when
+          # GITHUB_REPOSITORY equals the destination, and it loads
+          # prepare_frontend_pages.py from GITHUB_WORKSPACE.
+          env \
+            GITHUB_REPOSITORY=ahuai6/Sub-Store-Fork \
+            GITHUB_WORKSPACE="$FORK_ROOT" \
+            PUBLIC_DIST_TOKEN="$PUBLIC_DIST_TOKEN" \
+            PUBLIC_DIST_REPO="$PUBLIC_DIST_REPO" \
+            bash fork/.github/scripts/publish_frontend_pages.sh "${PWD}/frontend/dist"

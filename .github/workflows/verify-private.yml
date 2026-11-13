@@ -1,0 +1,36 @@
+name: verify-private
+
+# Run the private publish-dist checks for a branch or SHA that Actions on
+# ahuai6/Sub-Store-Fork can no longer run. Does not publish.
+#
+# When FORK_REPO_TOKEN can write commit statuses, the result is posted on that
+# SHA as context Sub-Store-Fork-Dist/verify so the private PR's check list
+# shows it. A missing status permission is a warning; the Actions run is still
+# the result.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch or commit SHA in ahuai6/Sub-Store-Fork
+        required: true
+        type: string
+
+run-name: verify ${{ inputs.ref }}
+
+# contents: write matches the called workflow. Verification does not push.
+# The private commit status is posted with FORK_REPO_TOKEN, not this token.
+permissions:
+  contents: write
+
+concurrency:
+  group: verify-private-${{ inputs.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    uses: ./.github/workflows/fork-build.yml
+    secrets: inherit
+    with:
+      ref: ${{ inputs.ref }}
+      publish: false
+      post_status: true

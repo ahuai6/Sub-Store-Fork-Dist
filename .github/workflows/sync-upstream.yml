@@ -1,0 +1,446 @@
+name: sync-upstream
+
+# Daily upstream sync, run from this public repo because the private fork's
+# Actions spending limit refuses jobs before they start.
+#
+# Checks out ahuai6/Sub-Store-Fork with FORK_REPO_TOKEN and pushes only to that
+# repo. upstream is fast-forwarded. main is updated only when the merge is
+# clean, the fork patch still applies, and the publish-dist checks pass.
+# Otherwise a PR (or an issue, when the failure has no conflict files or the
+# PR branch is not a fast-forward) is opened on the private repo.
+#
+# Git identity is set before `git merge`. Runners have no committer identity,
+# and current git refuses the merge with "fatal: empty ident name" before it
+# records conflicts. That is the fix from private PR #13. This workflow never
+# force-pushes and never deletes branches.
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  FORK_REPO: ahuai6/Sub-Store-Fork
+  GIT_TERMINAL_PROMPT: "0"
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Require FORK_REPO_TOKEN
+        env:
+          FORK_REPO_TOKEN: ${{ secrets.FORK_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          trimmed=$(printf '%s' "$FORK_REPO_TOKEN" | tr -d '[:space:]')
+          if [[ -z "$trimmed" ]]; then
+            echo "::error title=FORK_REPO_TOKEN is not set::Add repository secret FORK_REPO_TOKEN on ahuai6/Sub-Store-Fork-Dist. It must be a fine-grained PAT for ahuai6/Sub-Store-Fork only, with Contents, Pull requests, and Issues set to Read and write, and Commit statuses set to Read and write."
+            exit 1
+          fi
+
+      - name: Checkout workflow scripts
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Checkout private fork
+        uses: actions/checkout@v6
+        with:
+          repository: ahuai6/Sub-Store-Fork
+          token: ${{ secrets.FORK_REPO_TOKEN }}
+          ref: main
+          fetch-depth: 0
+          path: fork
+          persist-credentials: true
+
+      - name: Confirm the checkout is the private fork
+        working-directory: fork
+        run: |
+          set -euo pipefail
+          url=$(git remote get-url origin)
+          case "$url" in
+            *@*)
+              echo "::error::The fork checkout origin contains credentials. Refusing to continue."
+              exit 1
+              ;;
+          esac
+          case "$url" in
+            https://github.com/ahuai6/Sub-Store-Fork|https://github.com/ahuai6/Sub-Store-Fork.git)
+              echo "Checkout is ahuai6/Sub-Store-Fork."
+              ;;
+            *)
+              echo "::error::Refusing to continue because the checkout origin is not ahuai6/Sub-Store-Fork."
+              exit 1
+              ;;
+          esac
+
+      - name: Fetch upstream
+        working-directory: fork
+        run: |
+          git remote add upstream https://github.com/sub-store-org/Sub-Store.git
+          git fetch upstream master --tags --prune --force
+
+      - name: Fast-forward upstream branch
+        working-directory: fork
+        run: |
+          set -euo pipefail
+          # git push has no --ff-only. Confirm the remote tip is an ancestor, then
+          # push without --force. A rejected non-fast-forward still fails the step.
+          target_sha=$(git rev-parse upstream/master)
+          if git ls-remote --exit-code --heads origin upstream >/dev/null; then
+            # Fetch into a throwaway ref so a stale local tip cannot reject the read.
+            git update-ref -d refs/tmp/sync-upstream-tip 2>/dev/null || true
+            git fetch --no-tags origin refs/heads/upstream:refs/tmp/sync-upstream-tip
+            remote_sha=$(git rev-parse refs/tmp/sync-upstream-tip)
+          else
+            remote_sha=""
+          fi
+          if [ -z "$remote_sha" ]; then
+            echo "Creating refs/heads/upstream at ${target_sha}"
+          elif [ "$remote_sha" = "$target_sha" ]; then
+            echo "refs/heads/upstream is already ${target_sha}"
+          elif git merge-base --is-ancestor "$remote_sha" "$target_sha"; then
+            echo "Fast-forward ${remote_sha} -> ${target_sha}"
+          else
+            echo "::error::Refusing to force-update refs/heads/upstream (${remote_sha} is not an ancestor of ${target_sha})."
+            exit 1
+          fi
+          git push origin "${target_sha}:refs/heads/upstream"
+
+      - name: Mirror new upstream tags
+        working-directory: fork
+        run: |
+          set -euo pipefail
+          # Tags already on origin are left where they are, even if upstream moved them.
+          git ls-remote --tags origin | awk '{print $2}' | sed 's/\^{}$//' | sort -u > /tmp/origin-tags
+          refs=()
+          while read -r _sha ref; do
+            case "$ref" in
+              refs/tags/*^{}) continue ;;
+              refs/tags/*) ;;
+              *) continue ;;
+            esac
+            if ! grep -Fxq "$ref" /tmp/origin-tags; then
+              refs+=("${ref}:${ref}")
+            fi
+          done < <(git ls-remote --tags upstream)
+          if [ ${#refs[@]} -eq 0 ]; then
+            echo "No new upstream tags."
+          else
+            echo "Pushing ${#refs[@]} new tag(s)."
+            git push origin "${refs[@]}"
+          fi
+
+      - name: Merge upstream into main
+        id: merge
+        working-directory: fork
+        run: |
+          set -euo pipefail
+          git checkout main
+          # Runners have no committer identity. Git 2.56 refuses `git merge`
+          # before it writes the index (`fatal: empty ident name`), and
+          # `git diff --diff-filter=U` is then empty. The conflict PR used to
+          # publish that blank list. Set the same bot identity used for commits.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          before=$(git rev-parse HEAD)
+          set +e
+          git merge --no-edit upstream/master > /tmp/merge-output.txt 2>&1
+          code=$?
+          set -e
+          cat /tmp/merge-output.txt
+          if [ "$code" -ne 0 ]; then
+            # One path per unmerged index stage. This stays empty when merge
+            # exits before recording conflicts; the PR/issue body says so.
+            git ls-files -u --format='%(path)' | sort -u > /tmp/conflict-files || true
+            if [ -s /tmp/conflict-files ]; then
+              echo "conflicts=true" >> "$GITHUB_OUTPUT"
+              echo "Unmerged files:"
+              cat /tmp/conflict-files
+            else
+              echo "conflicts=false" >> "$GITHUB_OUTPUT"
+              cp /tmp/merge-output.txt /tmp/merge-error.txt
+              echo "Merge failed before any unmerged paths were recorded."
+            fi
+            git merge --abort || true
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "clean=true"
+            echo "conflicts=false"
+            echo "before=${before}"
+            echo "after=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Reapply fork frontend customizations
+        id: fork
+        if: steps.merge.outputs.clean == 'true'
+        working-directory: fork
+        run: |
+          set -euo pipefail
+          if ! node .github/scripts/apply-fork-frontend.mjs > /tmp/fork-patch.txt 2>&1; then
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! node .github/scripts/apply-fork-runtime.mjs --check >> /tmp/fork-patch.txt 2>&1; then
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          cat /tmp/fork-patch.txt
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+          if git diff --quiet -- backend/src/restful/miscs.js backend/src/utils/cors.js; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add backend/src/restful/miscs.js backend/src/utils/cors.js
+            git commit -m "reapply fork frontend redirect and CORS origin"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report a fork patch that no longer applies
+        if: steps.merge.outputs.clean == 'true' && steps.fork.outputs.ok != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.FORK_REPO_TOKEN }}
+        working-directory: fork
+        run: |
+          set -euo pipefail
+          title="sync: fork frontend patch no longer applies"
+          {
+            echo "Automatic merge of \`sub-store-org/Sub-Store\` \`master\` into \`main\` was clean, but the fork frontend patch no longer matches. \`main\` was not pushed. Nothing was force-pushed."
+            echo
+            echo "\`node .github/scripts/apply-fork-frontend.mjs\` or \`node .github/scripts/apply-fork-runtime.mjs --check\` failed:"
+            echo
+            echo '```'
+            cat /tmp/fork-patch.txt
+            echo '```'
+            echo
+            echo "Keep these customizations:"
+            echo
+            echo "- \`backend/src/restful/miscs.js\` redirects \`/\` to \`https://ahuai6.github.io/Sub-Store-Fork-Dist/\`."
+            echo "- \`backend/src/utils/cors.js\` keeps \`https://ahuai6.github.io\` on \`NON_NODE_CORS_DEFAULT\`."
+            echo
+            echo "Upstream commit: \`$(git rev-parse upstream/master)\`"
+          } > /tmp/fork-patch-issue.md
+          existing=$(gh issue list --repo "$FORK_REPO" --state open --search "in:title ${title}" --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$FORK_REPO" --body-file /tmp/fork-patch-issue.md
+          else
+            gh issue create --repo "$FORK_REPO" --title "$title" --body-file /tmp/fork-patch-issue.md
+          fi
+          exit 1
+
+      - name: Set up Node.js
+        if: steps.merge.outputs.clean == 'true' && steps.fork.outputs.ok == 'true' && (steps.merge.outputs.before != steps.merge.outputs.after || steps.fork.outputs.changed == 'true')
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: fork/.node-version
+
+      - name: Run publish-dist checks before pushing main
+        id: tests
+        if: steps.merge.outputs.clean == 'true' && steps.fork.outputs.ok == 'true' && (steps.merge.outputs.before != steps.merge.outputs.after || steps.fork.outputs.changed == 'true')
+        env:
+          PUBLIC_DIST_REPO: ahuai6/Sub-Store-Fork-Dist
+        run: |
+          set +e
+          set -o pipefail
+          bash "${GITHUB_WORKSPACE}/.github/scripts/run_fork_publish_checks.sh" "${GITHUB_WORKSPACE}/fork" | tee /tmp/fork-checks.txt
+          code=$?
+          set -e
+          echo "exit=${code}" >> "$GITHUB_OUTPUT"
+          exit "$code"
+
+      - name: Open a PR when the checks fail
+        if: always() && steps.tests.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.FORK_REPO_TOKEN }}
+        working-directory: fork
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          log = Path("/tmp/fork-checks.txt")
+          text = log.read_text(errors="replace") if log.exists() else "(no log)"
+          tail = "\n".join(text.splitlines()[-80:]).replace("```", "'''")
+          tail = re.sub(r"https://[^@\s/]+@", "https://[redacted]@", tail)
+          tail = re.sub(r"(github_pat_|ghs_|ghp_|x-access-token:)[A-Za-z0-9_]+", r"\1[redacted]", tail)
+          Path("/tmp/fork-checks-tail.txt").write_text(tail)
+          PY
+          pushed=false
+          if git push origin "HEAD:refs/heads/sync/tests-failed"; then
+            pushed=true
+          else
+            echo "Could not fast-forward sync/tests-failed. Not force-pushing."
+          fi
+          {
+            echo "Automatic merge of \`sub-store-org/Sub-Store\` \`master\` into \`main\` was clean, but the publish-dist checks failed. \`main\` was not pushed. Nothing was force-pushed."
+            echo
+            if [ "$pushed" = "true" ]; then
+              echo "The merge is on \`sync/tests-failed\`."
+            else
+              echo "\`sync/tests-failed\` was not updated because that push was not a fast-forward."
+            fi
+            echo
+            echo "Upstream commit: \`$(git rev-parse upstream/master)\`"
+            echo
+            echo "Last lines of the checks:"
+            echo
+            echo '```'
+            cat /tmp/fork-checks-tail.txt
+            echo '```'
+          } > /tmp/sync-tests-body.md
+          existing=$(gh pr list --repo "$FORK_REPO" --base main --head sync/tests-failed --state open --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh pr comment "$existing" --repo "$FORK_REPO" --body-file /tmp/sync-tests-body.md
+            exit 0
+          fi
+          if [ "$pushed" != "true" ]; then
+            gh issue create --repo "$FORK_REPO" --title "sync: upstream merge checks failed" --body-file /tmp/sync-tests-body.md
+            exit 0
+          fi
+          gh pr create --repo "$FORK_REPO" --base main --head sync/tests-failed --title "sync: upstream merge checks failed" --body-file /tmp/sync-tests-body.md
+
+      - name: Push main
+        id: push
+        if: steps.merge.outputs.clean == 'true' && steps.fork.outputs.ok == 'true' && (steps.tests.outcome == 'success' || steps.tests.outcome == 'skipped')
+        working-directory: fork
+        run: |
+          set -euo pipefail
+          git push origin main
+          if [ "${{ steps.merge.outputs.before }}" != "${{ steps.merge.outputs.after }}" ] || [ "${{ steps.fork.outputs.changed }}" = "true" ]; then
+            echo "changed=true" >> "$GITHUB_ENV"
+          else
+            echo "changed=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Close an open conflict PR after a clean merge
+        if: steps.push.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.FORK_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          number=$(gh pr list --repo "$FORK_REPO" --base main --head sync/upstream --state open --json number --jq '.[0].number')
+          if [ -n "$number" ]; then
+            gh pr close "$number" --repo "$FORK_REPO" --comment "Upstream merged into main cleanly, so this conflict PR is no longer needed."
+          fi
+
+      - name: Close an open test-failure PR after the checks pass
+        if: steps.push.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.FORK_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          number=$(gh pr list --repo "$FORK_REPO" --base main --head sync/tests-failed --state open --json number --jq '.[0].number')
+          if [ -n "$number" ]; then
+            gh pr close "$number" --repo "$FORK_REPO" --comment "The publish-dist checks passed and main was updated, so this test-failure PR is no longer needed."
+          fi
+
+      - name: Publish when the backend version or fork patch changes
+        if: steps.push.outcome == 'success' && env.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORK_CHANGED: ${{ steps.fork.outputs.changed }}
+        working-directory: fork
+        run: |
+          set -euo pipefail
+          # A push to the private repo does not start Dist's publish workflow.
+          # Dispatch it when the release version or the fork redirect/CORS
+          # patch changed. Other main commits are published by the schedule
+          # once their SHA differs from the Built from line in the Dist README.
+          publish=false
+          if git diff --name-only "${{ steps.merge.outputs.before }}" "${{ steps.merge.outputs.after }}" | grep -qx 'backend/package.json'; then
+            publish=true
+          fi
+          if [ "$FORK_CHANGED" = "true" ]; then
+            publish=true
+          fi
+          if [ "$publish" = "true" ]; then
+            gh workflow run publish-dist.yml --repo "${{ github.repository }}" --ref main
+          else
+            echo "No package.json bump and no fork patch commit. The publish-dist schedule publishes other private main SHAs."
+          fi
+
+      - name: Open a PR when the merge conflicts
+        if: steps.merge.outputs.clean != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.FORK_REPO_TOKEN }}
+        working-directory: fork
+        run: |
+          set -euo pipefail
+          # The PR head is upstream/master itself. Resolving happens on the PR.
+          # Do not force this branch if someone already pushed a resolution.
+          if [ "${{ steps.merge.outputs.conflicts }}" != "true" ]; then
+            {
+              echo "Automatic merge of \`sub-store-org/Sub-Store\` \`master\` into \`main\` failed before any conflicts were recorded. Nothing was force-pushed, and \`sync/upstream\` was not updated."
+              echo
+              echo "\`git merge\` output:"
+              echo
+              echo '```'
+              cat /tmp/merge-error.txt
+              echo '```'
+              echo
+              echo "Upstream commit: \`$(git rev-parse upstream/master)\`"
+            } > /tmp/sync-pr-body.md
+            title="sync: upstream merge failed before conflicts were recorded"
+            existing=$(gh issue list --repo "$FORK_REPO" --state open --search "in:title ${title}" --json number --jq '.[0].number')
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" --repo "$FORK_REPO" --body-file /tmp/sync-pr-body.md
+            else
+              gh issue create --repo "$FORK_REPO" --title "$title" --body-file /tmp/sync-pr-body.md
+            fi
+            exit 1
+          fi
+          if ! git push origin upstream/master:refs/heads/sync/upstream; then
+            body="Could not update \`sync/upstream\` (it is not a fast-forward). Upstream commit: $(git rev-parse upstream/master). Conflicting files:"$'\n\n```\n'"$(cat /tmp/conflict-files)"$'\n```'$'\n\n'"Keep the fork redirect in \`backend/src/restful/miscs.js\` (\`https://ahuai6.github.io/Sub-Store-Fork-Dist/\`) and \`https://ahuai6.github.io\` on \`NON_NODE_CORS_DEFAULT\` in \`backend/src/utils/cors.js\`. \`node .github/scripts/apply-fork-frontend.mjs\` reapplies both when the anchors still match. Nothing was force-pushed."
+            title="sync: upstream merge conflicts need attention"
+            existing=$(gh issue list --repo "$FORK_REPO" --state open --search "in:title ${title}" --json number --jq '.[0].number')
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" --repo "$FORK_REPO" --body "$body"
+            else
+              gh issue create --repo "$FORK_REPO" --title "$title" --body "$body"
+            fi
+            exit 1
+          fi
+          {
+            echo "Automatic merge of \`sub-store-org/Sub-Store\` \`master\` into \`main\` hit conflicts. Nothing was force-pushed."
+            echo
+            echo "The \`upstream\` branch was fast-forwarded and is still a pristine copy of upstream \`master\`."
+            echo
+            echo "Conflicting files:"
+            echo
+            echo '```'
+            cat /tmp/conflict-files
+            echo '```'
+            echo
+            echo "Upstream commit: \`$(git rev-parse upstream/master)\`"
+            echo
+            echo "Fork customizations that must be kept:"
+            echo
+            echo "- \`backend/src/restful/miscs.js\` redirects \`/\` to \`https://ahuai6.github.io/Sub-Store-Fork-Dist/\`."
+            echo "- \`backend/src/utils/cors.js\` keeps \`https://ahuai6.github.io\` on \`NON_NODE_CORS_DEFAULT\`."
+            echo "- Run \`node .github/scripts/apply-fork-frontend.mjs\` and commit the result when the anchors still match."
+            echo
+            echo "Resolve the conflicts on this PR. Do not force-push \`main\` or \`upstream\`."
+          } > /tmp/sync-pr-body.md
+          existing=$(gh pr list --repo "$FORK_REPO" --base main --head sync/upstream --state open --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh pr comment "$existing" --repo "$FORK_REPO" --body-file /tmp/sync-pr-body.md
+            exit 0
+          fi
+          if ! gh pr create --repo "$FORK_REPO" --base main --head sync/upstream --title "sync: resolve upstream merge conflicts" --body-file /tmp/sync-pr-body.md; then
+            gh issue create --repo "$FORK_REPO" --title "sync: resolve upstream merge conflicts" --body-file /tmp/sync-pr-body.md
+            exit 1
+          fi

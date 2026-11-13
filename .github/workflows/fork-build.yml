@@ -1,0 +1,191 @@
+name: fork-build
+
+# Called by publish-dist and verify-private. Not a standalone entry point.
+# Checks out ahuai6/Sub-Store-Fork and runs that repo's publish-dist checks.
+# Scripts stay in the private repo; this workflow only invokes them.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Branch or commit SHA in ahuai6/Sub-Store-Fork
+        required: true
+        type: string
+      publish:
+        description: Publish public-dist to Dist main and the Release
+        required: false
+        type: boolean
+        default: false
+      post_status:
+        description: Post a commit status on the private SHA
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  FORK_REPO: ahuai6/Sub-Store-Fork
+  PUBLIC_DIST_REPO: ahuai6/Sub-Store-Fork-Dist
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Require FORK_REPO_TOKEN
+        env:
+          FORK_REPO_TOKEN: ${{ secrets.FORK_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          trimmed=$(printf '%s' "$FORK_REPO_TOKEN" | tr -d '[:space:]')
+          if [[ -z "$trimmed" ]]; then
+            echo "::error title=FORK_REPO_TOKEN is not set::Add repository secret FORK_REPO_TOKEN on ahuai6/Sub-Store-Fork-Dist. It must be a fine-grained PAT for ahuai6/Sub-Store-Fork only, with Contents, Pull requests, and Issues set to Read and write, and Commit statuses set to Read and write."
+            exit 1
+          fi
+
+      - name: Validate ref
+        env:
+          VERIFY_REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re, sys
+          ref = os.environ.get("VERIFY_REF", "")
+          if (
+              not ref
+              or ref.startswith("-")
+              or ref.startswith("/")
+              or ref.endswith("/")
+              or ".." in ref
+              or "//" in ref
+              or not re.fullmatch(r"[A-Za-z0-9._/-]{1,255}", ref)
+          ):
+              print("::error::Ref must be a branch name or commit SHA (letters, numbers, ., _, /, -).")
+              sys.exit(1)
+          PY
+
+      - name: Checkout workflow scripts
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Checkout private fork
+        uses: actions/checkout@v6
+        with:
+          repository: ahuai6/Sub-Store-Fork
+          token: ${{ secrets.FORK_REPO_TOKEN }}
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          path: fork
+          persist-credentials: true
+
+      - name: Confirm the checkout is the private fork
+        working-directory: fork
+        run: |
+          set -euo pipefail
+          url=$(git remote get-url origin)
+          case "$url" in
+            *@*)
+              echo "::error::The fork checkout origin contains credentials. Refusing to continue."
+              exit 1
+              ;;
+          esac
+          case "$url" in
+            https://github.com/ahuai6/Sub-Store-Fork|https://github.com/ahuai6/Sub-Store-Fork.git)
+              echo "Checkout is ahuai6/Sub-Store-Fork."
+              ;;
+            *)
+              echo "::error::Refusing to continue because the checkout origin is not ahuai6/Sub-Store-Fork."
+              exit 1
+              ;;
+          esac
+
+      - name: Record source SHA
+        id: source
+        working-directory: fork
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Checked out SHA is not a 40-character hex commit."
+            exit 1
+          fi
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "Source SHA ${sha}"
+
+      - name: Mark commit status pending
+        if: inputs.post_status == true
+        continue-on-error: true
+        env:
+          FORK_REPO_TOKEN: ${{ secrets.FORK_REPO_TOKEN }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          bash .github/scripts/post_fork_status.sh pending "Verification is running in Sub-Store-Fork-Dist."
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: fork/.node-version
+
+      - name: Run fork publish checks
+        id: checks
+        env:
+          PUBLIC_DIST_REPO: ${{ env.PUBLIC_DIST_REPO }}
+        run: bash .github/scripts/run_fork_publish_checks.sh "${GITHUB_WORKSPACE}/fork"
+
+      - name: Publish to Dist main and the Release
+        id: publish
+        if: inputs.publish == true && steps.checks.outcome == 'success'
+        working-directory: fork
+        env:
+          GITHUB_REPOSITORY: ahuai6/Sub-Store-Fork
+          FORK_ROOT: ${{ github.workspace }}/fork
+          PUBLIC_DIST_TOKEN: ${{ github.token }}
+          PUBLIC_DIST_REPO: ahuai6/Sub-Store-Fork-Dist
+          PUBLISH_REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          # publish_public_dist.sh refuses to publish when GITHUB_REPOSITORY
+          # equals PUBLIC_DIST_REPO, and it copies LICENSE from GITHUB_WORKSPACE.
+          # This job runs in Dist, so those variables point at the private checkout.
+          # PUBLIC_DIST_TOKEN is this workflow's GITHUB_TOKEN (contents: write).
+          if [[ "$PUBLISH_REF" != "main" ]]; then
+            echo "::error::Refusing to publish a ref other than main."
+            exit 1
+          fi
+          branch=$(git rev-parse --abbrev-ref HEAD)
+          if [[ "$branch" != "main" ]]; then
+            echo "::error::Refusing to publish because HEAD is not main."
+            exit 1
+          fi
+          # Set these on the child so the private script sees the fork as the
+          # source repo even if the runner keeps its own GITHUB_REPOSITORY.
+          env \
+            GITHUB_REPOSITORY=ahuai6/Sub-Store-Fork \
+            GITHUB_WORKSPACE="$FORK_ROOT" \
+            PUBLIC_DIST_TOKEN="$PUBLIC_DIST_TOKEN" \
+            PUBLIC_DIST_REPO="$PUBLIC_DIST_REPO" \
+            bash .github/scripts/publish_public_dist.sh public-dist
+
+      - name: Record commit status
+        if: always() && inputs.post_status == true && steps.source.outputs.sha != ''
+        continue-on-error: true
+        env:
+          FORK_REPO_TOKEN: ${{ secrets.FORK_REPO_TOKEN }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CHECKS_OUTCOME: ${{ steps.checks.outcome }}
+          PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
+        run: |
+          set -euo pipefail
+          if [[ "$CHECKS_OUTCOME" == "success" && ( "$PUBLISH_OUTCOME" == "success" || "$PUBLISH_OUTCOME" == "skipped" ) ]]; then
+            bash .github/scripts/post_fork_status.sh success "Verification passed."
+          else
+            bash .github/scripts/post_fork_status.sh failure "Verification failed. See the Dist Actions run."
+          fi
