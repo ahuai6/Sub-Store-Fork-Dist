@@ -8,8 +8,9 @@
  * upstream attribution, terms and changes. Published at the fork owner's
  * explicit request; this file is separate from the backend AGPL license.
  *
- * Arguments and output remain compatible. two_phase and dedup_target are
- * opt-in; time_budget is milliseconds (default safety ceiling: 880s). Changes:
+ * Arguments and output remain compatible. two_phase, dedup_target and
+ * keep_last are opt-in; time_budget is milliseconds (default safety ceiling:
+ * 880s). Changes:
  * - cache writes are flushed in batches and once at the end
  * - the cache key is geo: plus MD5 of the original key material
  * - the regex and the format template are compiled once
@@ -17,11 +18,17 @@
  * - optional time_budget (milliseconds) is off by default. When set, no new
  *   node is started after the budget. Requests are capped to remaining time. Nodes
  *   that never started keep their original name and are not cached as failed.
+ * - optional keep_last reuses the last successful result when a test fails,
+ *   times out, or is skipped by the time budget. Default off. While off, output
+ *   matches the previous script. The stored result uses the same cacheId as the
+ *   TTL cache. It is not expired by scriptCacheTtl. keep_last_max_age can limit
+ *   its age. Failures do not write or erase it. Refresh/clear-cache does.
  *
  * Cache entries expire with settings.scriptCacheTtl (seconds), otherwise
  * 48 hours, the same rule as script-resource-cache.js. A hash is only the
  * key. It is not a reason to keep a result after that TTL. The existing
- * clear-cache action (scriptResourceCache.revokeAll) deletes these entries.
+ * clear-cache action (scriptResourceCache.revokeAll) deletes these entries
+ * and the separate keep_last store.
  *
  * When scriptResourceCache.sharedCheckGet is present, a node with the same
  * connection identity (name ignored) and the same api/regex/internal/method
@@ -53,6 +60,9 @@
  * - [cache] 使用缓存. 默认不使用缓存
  * - [disable_failed_cache/ignore_failed_error] 不使用失败缓存. 失败结果仍会写入, 与原脚本一致
  * - [time_budget] 可选总时间预算(毫秒). 默认关闭
+ * - [keep_last] 失败、超时或时间预算跳过时, 沿用该节点上次成功结果. 默认关闭
+ * - [keep_last_max_age] 上次成功结果的最长可用时间. 默认不限制.
+ *   纯数字单位为毫秒, 与 timeout/time_budget 相同; 也可写 3600s、24h、7d
  */
 
 async function operator(proxies = [], targetPlatform, context) {
@@ -86,6 +96,8 @@ async function operator(proxies = [], targetPlatform, context) {
   const cacheEnabled = $arguments.cache && scriptTtlMs() > 0
   const twoPhase = enabled($arguments.two_phase)
   const targetDedup = enabled($arguments.dedup_target)
+  const keepLast = enabled($arguments.keep_last)
+  const keepLastMaxAge = parseMaxAge($arguments.keep_last_max_age)
   const requests = new Map() // pending promises only, scoped to this invocation
   const reachabilityUrl = $arguments.reachability_url || 'http://www.gstatic.com/generate_204'
   const reachabilityTimeout = Math.min(5000, positive($arguments.reachability_timeout, 1500))
@@ -117,12 +129,20 @@ async function operator(proxies = [], targetPlatform, context) {
 
   const CACHE_BATCH = 25
   const pending = []
+  const lastPending = []
+  const started = keepLast ? new Set() : null
 
   try {
     await executeAsyncTasks(
       proxies.map(proxy => () => check(proxy)),
       { concurrency }
     )
+
+    if (started) {
+      for (const proxy of proxies) {
+        if (!started.has(proxy)) applyLastGood(proxy, cacheId(proxy))
+      }
+    }
 
     if (remove_incompatible || remove_failed) {
       proxies = proxies.filter(p => {
@@ -150,6 +170,7 @@ async function operator(proxies = [], targetPlatform, context) {
     return proxies
   } finally {
     flushPending()
+    flushLast()
   }
 
   function sharedIdentity(proxy) {
@@ -168,7 +189,8 @@ async function operator(proxies = [], targetPlatform, context) {
   }
 
   async function check(proxy) {
-    const id = cacheEnabled ? cacheId(proxy) : undefined
+    if (started) started.add(proxy)
+    const id = cacheEnabled || keepLast ? cacheId(proxy) : undefined
     let finishShared = null
     try {
       let node
@@ -184,7 +206,7 @@ async function operator(proxies = [], targetPlatform, context) {
         })
       }
       if (node) {
-        let cached = cache.get(id)
+        let cached = cache.get(cacheEnabled ? id : undefined)
         if (cacheEnabled && !cached && typeof cache.sharedCheckGet === 'function') {
           try {
             cached = cache.sharedCheckGet(sharedIdentity(proxy))
@@ -221,6 +243,7 @@ async function operator(proxies = [], targetPlatform, context) {
             $.info(`[${proxy.name}] 不使用失败缓存`)
           } else {
             $.info(`[${proxy.name}] 使用失败缓存`)
+            if (keepLast) applyLastGood(proxy, id)
             return
           }
         }
@@ -270,10 +293,14 @@ async function operator(proxies = [], targetPlatform, context) {
             remember(id, { api }, proxy, finishShared)
             finishShared = null
           }
-        } else if (cacheEnabled) {
-          $.info(`[${proxy.name}] 设置失败缓存`)
-          remember(id, {}, proxy, finishShared)
-          finishShared = null
+          rememberLast(id, api)
+        } else {
+          if (cacheEnabled) {
+            $.info(`[${proxy.name}] 设置失败缓存`)
+            remember(id, {}, proxy, finishShared)
+            finishShared = null
+          }
+          if (keepLast) applyLastGood(proxy, id)
         }
       } else {
         proxy._incompatible = true
@@ -282,6 +309,7 @@ async function operator(proxies = [], targetPlatform, context) {
       $.error(`[${proxy.name}] ${e.message ?? e}`)
       if (e.budgetExceeded) {
         if (finishShared) finishShared(null)
+        if (keepLast) applyLastGood(proxy, id)
         return
       }
       if (cacheEnabled) {
@@ -294,6 +322,7 @@ async function operator(proxies = [], targetPlatform, context) {
         } catch (err) {}
         finishShared = null
       }
+      if (keepLast) applyLastGood(proxy, id)
     }
   }
 
@@ -325,6 +354,66 @@ async function operator(proxies = [], targetPlatform, context) {
     if (!cacheEnabled || !id) return
     pending.push([id, data])
     if (pending.length >= CACHE_BATCH) flushPending()
+  }
+
+  function rememberLast(id, api) {
+    if (!keepLast || !id || api == null) return
+    lastPending.push([id, { api, savedAt: Date.now() }])
+    if (lastPending.length >= CACHE_BATCH) flushLast()
+  }
+
+  function flushLast() {
+    if (!lastPending.length) return
+    const items = lastPending.splice(0, lastPending.length)
+    if (typeof cache.lastGoodSet !== 'function') return
+    for (const [id, data] of items) {
+      try {
+        cache.lastGoodSet(id, data)
+      } catch (e) {}
+    }
+    if (typeof cache.lastGoodFlush === 'function') {
+      try {
+        cache.lastGoodFlush()
+      } catch (e) {}
+    }
+  }
+
+  function readLast(id) {
+    if (!keepLast || !id || typeof cache.lastGoodGet !== 'function') return null
+    let stored
+    try {
+      stored = cache.lastGoodGet(id)
+    } catch (e) {
+      return null
+    }
+    if (!stored || stored.api == null) return null
+    if (keepLastMaxAge > 0) {
+      const savedAt = Number(stored.savedAt)
+      if (!Number.isFinite(savedAt) || Date.now() - savedAt > keepLastMaxAge) return null
+    }
+    return stored
+  }
+
+  function applyLastGood(proxy, id) {
+    const stored = readLast(id)
+    if (!stored) return false
+    $.info(`[${proxy.name}] 使用上次成功结果`)
+    proxy.name = formatNode({ proxy, api: stored.api })
+    proxy._geo = stored.api
+    return true
+  }
+
+  function parseMaxAge(value) {
+    if (value == null || value === '' || value === false) return 0
+    const text = String(value).trim()
+    if (!text || text === '0') return 0
+    const match = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)?$/i.exec(text)
+    if (!match) return 0
+    const amount = Number(match[1])
+    if (!Number.isFinite(amount) || amount <= 0) return 0
+    const unit = (match[2] || 'ms').toLowerCase()
+    const scale = { ms: 1, s: 1000, m: 60 * 1000, h: 60 * 60 * 1000, d: 24 * 60 * 60 * 1000 }
+    return amount * scale[unit]
   }
 
   function flushPending() {

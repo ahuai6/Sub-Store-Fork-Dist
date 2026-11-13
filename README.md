@@ -6,7 +6,7 @@ The source repository (`ahuai6/Sub-Store-Fork`) is private. Only the explicitly 
 | | |
 | --- | --- |
 | Version | `2.44.8` |
-| Built from | `9105596c208bd4fa47f2fe204bb43bc7f4a5b733` |
+| Built from | `2b44d0f37b26bea048c045aa70d36b3f67d5c3ce` |
 | Upstream tree | `091e6f8d8c2dcec8c1d8e792ecee4304935d6e90` |
 | Upstream project | https://github.com/sub-store-org/Sub-Store |
 
@@ -47,8 +47,21 @@ operator; see [GEO-NOTICE.md](./GEO-NOTICE.md) for attribution, upstream terms,
 changes and optional arguments, and [GEO-LICENSE.txt](./GEO-LICENSE.txt) for the
 upstream GPL-3.0 license. It is separate from the backend's AGPL license.
 
+Optional arguments (all default off / unchanged output):
+
+| Argument | Meaning |
+| --- | --- |
+| `two_phase` | Probe reachability before the geo request. |
+| `dedup_target` | Share one in-flight request for the same server, port, and proxy type. |
+| `time_budget` | Milliseconds. Stop starting further nodes once exhausted. |
+| `keep_last` | On failure, timeout, or a `time_budget` skip, reuse that node's last success. No marker is added. |
+| `keep_last_max_age` | Max age of that success. Milliseconds, or `3600s` / `24h` / `7d`. Omit to keep it until refresh. |
+
+Example: `keep_last=true&keep_last_max_age=7d`. `keep_last` is not expired by
+`scriptCacheTtl`. Refresh and clear-cache delete it with the other caches.
+
 ## License
 
 Sub-Store is licensed under the GNU Affero General Public License v3.0. See [LICENSE](./LICENSE).
 
-Corresponding source for this build is upstream commit `091e6f8d8c2dcec8c1d8e792ecee4304935d6e90` (https://github.com/sub-store-org/Sub-Store/tree/091e6f8d8c2dcec8c1d8e792ecee4304935d6e90) plus whatever else is in the private source repo at `9105596c208bd4fa47f2fe204bb43bc7f4a5b733`. The release build also pins the mihomo User-Agent the same way upstream's release workflow does. AGPL-3.0 requires modified versions that are distributed to make their corresponding source available.
+Corresponding source for this build is upstream commit `091e6f8d8c2dcec8c1d8e792ecee4304935d6e90` (https://github.com/sub-store-org/Sub-Store/tree/091e6f8d8c2dcec8c1d8e792ecee4304935d6e90) plus whatever else is in the private source repo at `2b44d0f37b26bea048c045aa70d36b3f67d5c3ce`. The release build also pins the mihomo User-Agent the same way upstream's release workflow does. AGPL-3.0 requires modified versions that are distributed to make their corresponding source available.
