@@ -6,8 +6,8 @@ The source repository (`ahuai6/Sub-Store-Fork`) is private. Only the explicitly 
 | | |
 | --- | --- |
 | Version | `2.44.11` |
-| Built from | `85a458aba7b787d31ec2a554fcc995333525ba30` |
-| Upstream tree | `091e6f8d8c2dcec8c1d8e792ecee4304935d6e90` |
+| Built from | `33d124fb1819087db2f2407d618d92f9d1023280` |
+| Upstream tree | `d9896398feeb55c42fa3bd15f70104dd02b13899` |
 | Upstream project | https://github.com/sub-store-org/Sub-Store |
 
 ## Surge beta module
@@ -64,4 +64,4 @@ Example: `keep_last=true&keep_last_max_age=7d`. `keep_last` is not expired by
 
 Sub-Store is licensed under the GNU Affero General Public License v3.0. See [LICENSE](./LICENSE).
 
-Corresponding source for this build is upstream commit `091e6f8d8c2dcec8c1d8e792ecee4304935d6e90` (https://github.com/sub-store-org/Sub-Store/tree/091e6f8d8c2dcec8c1d8e792ecee4304935d6e90) plus whatever else is in the private source repo at `85a458aba7b787d31ec2a554fcc995333525ba30`. The release build also pins the mihomo User-Agent the same way upstream's release workflow does. AGPL-3.0 requires modified versions that are distributed to make their corresponding source available.
+Corresponding source for this build is upstream commit `d9896398feeb55c42fa3bd15f70104dd02b13899` (https://github.com/sub-store-org/Sub-Store/tree/d9896398feeb55c42fa3bd15f70104dd02b13899) plus whatever else is in the private source repo at `33d124fb1819087db2f2407d618d92f9d1023280`. The release build also pins the mihomo User-Agent the same way upstream's release workflow does. AGPL-3.0 requires modified versions that are distributed to make their corresponding source available.
