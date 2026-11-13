@@ -1,8 +1,8 @@
-sha=6d13e7e257b52485d6835d1bbdbd1fc3f8270dd2
+sha=59632bfcba5193fcf213b545e025252007ca15aa
 track=release
-release_tag=2.34.2
-release_sha=6d13e7e257b52485d6835d1bbdbd1fc3f8270dd2
-package=2.34.2
+release_tag=2.34.3
+release_sha=59632bfcba5193fcf213b545e025252007ca15aa
+package=2.34.3
 base=/Sub-Store-Fork-Dist/
 api=https://sub.store
-patches=subpath-routes-1
+patches=subpath-routes-1-surge-session-1
