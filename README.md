@@ -6,7 +6,7 @@ The source repository (`ahuai6/Sub-Store-Fork`) is private. Only the explicitly 
 | | |
 | --- | --- |
 | Version | `2.44.8` |
-| Built from | `50dedf519bca1566a471ab26bd411d6ebdc3c57c` |
+| Built from | `9105596c208bd4fa47f2fe204bb43bc7f4a5b733` |
 | Upstream tree | `091e6f8d8c2dcec8c1d8e792ecee4304935d6e90` |
 | Upstream project | https://github.com/sub-store-org/Sub-Store |
 
@@ -24,6 +24,11 @@ https://github.com/ahuai6/Sub-Store-Fork-Dist/releases/latest/download/Surge-Bet
 
 Script paths inside the module use `releases/latest/download` on **this** repo.
 Compared with [upstream's beta module](https://raw.githubusercontent.com/sub-store-org/Sub-Store/master/config/Surge-Beta.sgmodule), those artifact URLs differ and the default `cors` list also includes `https://ahuai6.github.io`.
+
+Scheduled Gist sync, produce and prefetch tasks default to off. Installation
+requires no prefetch input: all parameters have defaults; unused prefetch target
+lists stay `off`. Existing saved module settings may persist on update, so
+check task names or reinstall to apply new defaults.
 
 ## Frontend
 
@@ -46,4 +51,4 @@ upstream GPL-3.0 license. It is separate from the backend's AGPL license.
 
 Sub-Store is licensed under the GNU Affero General Public License v3.0. See [LICENSE](./LICENSE).
 
-Corresponding source for this build is upstream commit `091e6f8d8c2dcec8c1d8e792ecee4304935d6e90` (https://github.com/sub-store-org/Sub-Store/tree/091e6f8d8c2dcec8c1d8e792ecee4304935d6e90) plus whatever else is in the private source repo at `50dedf519bca1566a471ab26bd411d6ebdc3c57c`. The release build also pins the mihomo User-Agent the same way upstream's release workflow does. AGPL-3.0 requires modified versions that are distributed to make their corresponding source available.
+Corresponding source for this build is upstream commit `091e6f8d8c2dcec8c1d8e792ecee4304935d6e90` (https://github.com/sub-store-org/Sub-Store/tree/091e6f8d8c2dcec8c1d8e792ecee4304935d6e90) plus whatever else is in the private source repo at `9105596c208bd4fa47f2fe204bb43bc7f4a5b733`. The release build also pins the mihomo User-Agent the same way upstream's release workflow does. AGPL-3.0 requires modified versions that are distributed to make their corresponding source available.
