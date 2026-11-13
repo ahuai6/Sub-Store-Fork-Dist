@@ -1,0 +1,112 @@
+name: publish-dist
+
+# Build and publish from the public repo. The private fork's Actions spending
+# limit refuses jobs before they start.
+#
+# Checks out ahuai6/Sub-Store-Fork with Actions secret FORK_REPO_TOKEN and runs
+# that repo's publish-dist checks and publish_public_dist.sh. Nothing private
+# is published beyond the files that script already copies (bundles, the Surge
+# module, geo.js, and its license/notice). No Actions artifacts are uploaded.
+# Pushes and Releases use this repo's GITHUB_TOKEN, so Actions workflow
+# permissions on Dist must be Read and write.
+#
+# The schedule publishes only when private main differs from the `Built from`
+# SHA in this repo's README on main (the version table publish_public_dist.sh
+# already writes). workflow_dispatch always builds.
+on:
+  workflow_dispatch:
+  schedule:
+    # Every 3 hours, offset from sync-upstream at 04:17 UTC.
+    - cron: "47 */3 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-dist
+  cancel-in-progress: false
+
+env:
+  FORK_REPO: ahuai6/Sub-Store-Fork
+  PUBLIC_DIST_REPO: ahuai6/Sub-Store-Fork-Dist
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+    steps:
+      - name: Require FORK_REPO_TOKEN
+        env:
+          FORK_REPO_TOKEN: ${{ secrets.FORK_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          trimmed=$(printf '%s' "$FORK_REPO_TOKEN" | tr -d '[:space:]')
+          if [[ -z "$trimmed" ]]; then
+            echo "::error title=FORK_REPO_TOKEN is not set::Add repository secret FORK_REPO_TOKEN on ahuai6/Sub-Store-Fork-Dist. It must be a fine-grained PAT for ahuai6/Sub-Store-Fork only, with Contents, Pull requests, and Issues set to Read and write, and Commit statuses set to Read and write."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Compare private main with the published SHA
+        id: gate
+        env:
+          FORK_REPO_TOKEN: ${{ secrets.FORK_REPO_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          readme=$(mktemp)
+          trap 'rm -f "$readme"' EXIT
+          gh api "repos/${PUBLIC_DIST_REPO}/contents/README.md?ref=main" --jq .content \
+            | tr -d '\n' | base64 -d > "$readme"
+          published=$(python3 .github/scripts/dist_source_sha.py < "$readme")
+          body=$(mktemp)
+          code=$(curl -sS -o "$body" -w '%{http_code}' \
+            -H "Authorization: Bearer ${FORK_REPO_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${FORK_REPO}/commits/main" || true)
+          if [[ "$code" != "200" ]]; then
+            echo "::error::Could not read ${FORK_REPO} main (HTTP ${code}). FORK_REPO_TOKEN needs Contents: Read on that private repo."
+            rm -f "$body"
+            exit 1
+          fi
+          private=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])' < "$body")
+          rm -f "$body"
+          if [[ ! "$private" =~ ^[0-9a-f]{40}$ || ! "$published" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Expected 40-character hex SHAs."
+            exit 1
+          fi
+          echo "Private main ${private}"
+          echo "Published SHA ${published}"
+          echo "private=${private}" >> "$GITHUB_OUTPUT"
+          echo "published=${published}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Source"
+            echo ""
+            echo "Private \`main\` \`${private}\`"
+            echo ""
+            echo "Published \`Built from\` \`${published}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "workflow_dispatch builds even when the SHAs match."
+          elif [[ "$private" == "$published" ]]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Private main matches the published SHA. Skipping the build."
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    uses: ./.github/workflows/fork-build.yml
+    secrets: inherit
+    with:
+      ref: main
+      publish: true
+      post_status: false
